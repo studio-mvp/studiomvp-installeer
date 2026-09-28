@@ -1,16 +1,18 @@
 #!/bin/bash
 # Studio MVP op een nieuwe Mac, met één regel in Terminal:
 #
-#   curl -fsSL https://raw.githubusercontent.com/mennovanpaassen/studiomvp-installeer/main/installeer.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/studio-mvp/studiomvp-installeer/main/installeer.sh | bash
 #
 # Wat het doet: Homebrew installeren (als dat er nog niet op staat), Node en het GitHub-programma (gh), inloggen bij
-# GitHub, Studio MVP ophalen naar ~/Projecten/studiomvp-starter en daar ./install.sh starten. Dat doet de rest: de
-# instellingen van het bureau (met het Studio MVP-wachtwoord), Sanity, je naam, Claude Code en de app in het Dock.
+# GitHub met je eigen account (dat een beheerder heeft toegevoegd aan de GitHub-organisatie studio-mvp; een openstaande
+# uitnodiging wordt hier geaccepteerd), Studio MVP ophalen naar ~/Projecten/studiomvp-starter en daar ./install.sh
+# starten. Dat doet de rest: de instellingen van het bureau (met het Studio MVP-wachtwoord), Sanity, je naam, Claude
+# Code en de app in het Dock.
 # Opnieuw draaien is altijd veilig: wat klaar is, wordt overgeslagen. sudo alleen voor Homebrew (het officiële
 # installatieprogramma van brew.sh), en alleen als Homebrew er nog niet op staat.
 #
 # Dit bestand is openbaar: er staan geen wachtwoorden, tokens of sleutels in. De instellingen van het bureau staan
-# versleuteld in de privé-repo mennovanpaassen/studiomvp-starter. Daar staat ook de bron van dit script, met tests.
+# versleuteld in de privé-repo studio-mvp/studiomvp-starter. Daar staat ook de bron van dit script, met tests.
 #
 # Proef (verandert niets):   curl -fsSL …/installeer.sh | bash -s -- --proef
 # Logboek (zonder geheimen): ~/Library/Logs/studiomvp-installeer.log
@@ -26,9 +28,10 @@
 set -Eeuo pipefail
 
 init() {
-  REPO='mennovanpaassen/studiomvp-starter'
+  ORG='studio-mvp'
+  REPO="$ORG/studiomvp-starter"
   REPO_URL="${STUDIOMVP_INSTALLEER_REPO_URL:-https://github.com/$REPO.git}"
-  GH_ACCOUNT='mennovanpaassen'
+  GH_WHO=''
   STARTER="$HOME/Projecten/studiomvp-starter"
   # shellcheck disable=SC2088 # (shown to the person, not expanded)
   STARTER_SHOWN='~/Projecten/studiomvp-starter'
@@ -218,7 +221,8 @@ intro() {
   say "Ik zet alles klaar om websites te maken met Studio MVP. Dat duurt 15 tot 30 minuten."
   say "Onderweg vraag ik je om:"
   say "  • het wachtwoord van je Mac (één keer, alleen als Homebrew er nog niet op staat);"
-  say "  • in te loggen bij GitHub in je browser, als $GH_ACCOUNT;"
+  say "  • in te loggen bij GitHub in je browser, met je EIGEN GitHub-account (nog geen account? maak er gratis een op"
+  say "    github.com/signup met je werkmailadres);"
   say "  • het Studio MVP-wachtwoord dat je van Karim of Menno kreeg;"
   say "  • in te loggen bij Sanity in je browser, en je naam en e-mailadres."
   say "Gaat er iets mis? Plak de regel dan gewoon nog eens: wat al klaar is, wordt overgeslagen."
@@ -483,50 +487,105 @@ gh_login_name() { gh api user --jq .login 2>/dev/null </dev/null || true; }
 
 # (the order of gh's own questions: first "Authenticate Git …?" (unless gh already does that for git), then the code)
 gh_login() {
-  say "Log in met het GitHub-account van Studio MVP: nu is dat $GH_ACCOUNT (de inlog krijg je van Karim of Menno)."
+  say "Log in met je EIGEN GitHub-account (nog geen account? maak er gratis een op github.com/signup met je werkmailadres)."
   say "Zo gaat het:"
   say "  1. Eerst vraagt het \"Authenticate Git with your GitHub credentials?\": druk op Enter (ja)."
   say "  2. Er verschijnt een code van 8 tekens (zoals A1B2-C3D4). Druk op Enter: je browser opent GitHub."
-  say "  3. Log daar in als $GH_ACCOUNT, typ de code over en klik op Authorize."
-  say "     (Staat je browser al ingelogd bij GitHub met je eigen account? Log daar dan eerst uit: rechtsboven op je"
-  say "     profielfoto → Sign out. Anders krijgt je eigen account de toegang, en dat werkt niet.)"
+  say "  3. Log daar in met je eigen account, typ de code over en klik op Authorize."
+  say "     (Staat je browser bij GitHub ingelogd met een ander account dan het jouwe? Log daar dan eerst uit: rechtsboven"
+  say "     op de profielfoto → Sign out.)"
   log "gh auth login gestart"
   gh auth login --hostname github.com --git-protocol https --web <&3 || true
   gh_logged_in
 }
 
+# This account in the GitHub organisation of Studio MVP: active | pending | none (GitHub: 404) | unknown.
+org_state() {
+  local out
+  if out="$(gh api "user/memberships/orgs/$ORG" --jq .state 2>&1 </dev/null)"; then
+    case "$out" in active | pending)
+      printf '%s\n' "$out"
+      return 0
+      ;;
+    esac
+  fi
+  # (gh prints GitHub's answer and then its own error on the same line: the error is what goes in the log)
+  log "lidmaatschap van $ORG: $(printf '%s\n' "$out" | sed -e 's/^{.*}//' -e '/^[[:space:]]*$/d' | sed -n 1p)"
+  case "$out" in *"HTTP 404"*) echo none ;; *) echo unknown ;; esac
+}
+
+# Studio MVP is in the organisation: a member goes on; a pending invitation is accepted here (gh's standard
+# permissions are enough for that); an account that was not added yet: who to ask, with which name, and stop.
+ensure_member() {
+  local state
+  GH_WHO="$(gh_login_name)"
+  state="$(org_state)"
+  case "$state" in
+    active) ok "Lid van Studio MVP op GitHub ($ORG)" ;;
+    pending)
+      if [ "$DRY" = 1 ]; then
+        plan "je uitnodiging van Studio MVP op GitHub ($ORG) accepteren"
+        return 0
+      fi
+      say "Je hebt een uitnodiging van Studio MVP op GitHub ($ORG); die accepteer ik nu voor je."
+      if [ "$(gh api -X PATCH "user/memberships/orgs/$ORG" -f state=active --jq .state 2>>"$LOG" </dev/null || true)" = active ]; then
+        ok "Uitnodiging geaccepteerd: je bent nu lid van Studio MVP op GitHub ($ORG)"
+      else
+        die "Je uitnodiging van Studio MVP op GitHub accepteren lukte niet." \
+          "Accepteer hem zelf: ga in je browser naar github.com/orgs/$ORG/invitation (ingelogd als ${GH_WHO:-jezelf}) en klik op Join." \
+          "Plak daarna deze regel opnieuw."
+      fi
+      ;;
+    none)
+      if [ "$DRY" = 1 ]; then
+        note "Je GitHub-account ${GH_WHO:-?} is nog niet toegevoegd aan Studio MVP; een echte installatie stopt hier."
+        tip "Vraag een beheerder: Instellingen › Nieuwe collega toevoegen, met jouw GitHub-naam ${GH_WHO:-?}."
+        return 0
+      fi
+      die "Je GitHub-account ${GH_WHO:-?} is nog niet toegevoegd aan Studio MVP." \
+        "Vraag een beheerder: Instellingen › Nieuwe collega toevoegen, met jouw GitHub-naam ${GH_WHO:-?}." \
+        "Plak daarna deze regel opnieuw." \
+        "(Is ${GH_WHO:-dit} niet jouw eigen GitHub-account? Typ dan eerst in Terminal: gh auth logout, en plak daarna de regel opnieuw.)"
+      ;;
+    *) note "Ik kon niet nagaan of je GitHub-account lid is van Studio MVP op GitHub ($ORG); ik ga verder." ;;
+  esac
+}
+
 ensure_github() {
   step "Voorbereiden 3/4 · Inloggen bij GitHub"
   if ! command -v gh >/dev/null 2>&1; then
-    plan "inloggen bij GitHub in je browser (gh auth login), als $GH_ACCOUNT"
+    plan "inloggen bij GitHub in je browser (gh auth login), met je eigen GitHub-account"
+    plan "nagaan of je GitHub-account lid is van Studio MVP op GitHub ($ORG)"
     return 0
   fi
   if gh_logged_in; then
     ok "Ingelogd bij GitHub als $(gh_login_name)"
   elif [ "$DRY" = 1 ]; then
-    plan "inloggen bij GitHub in je browser (gh auth login), als $GH_ACCOUNT"
+    plan "inloggen bij GitHub in je browser (gh auth login), met je eigen GitHub-account"
+    plan "nagaan of je GitHub-account lid is van Studio MVP op GitHub ($ORG)"
     return 0
   elif gh_login; then
     ok "Ingelogd bij GitHub als $(gh_login_name)"
   else
-    die "Je bent nog niet ingelogd bij GitHub." "Plak de installatieregel nog eens en log in als $GH_ACCOUNT."
+    die "Je bent nog niet ingelogd bij GitHub." "Plak de installatieregel nog eens en log in met je eigen GitHub-account."
   fi
   # (git uses the login of gh for github.com: no password questions from git)
   if [ "$DRY" != 1 ]; then gh auth setup-git --hostname github.com >/dev/null 2>&1 </dev/null || true; fi
+  ensure_member
 }
 
-# GitHub said no: explain, and offer to log in again with the right account. → 0 = try again
+# GitHub said no: explain, and offer to log in again (with the own account). → 0 = try again
 refused_again() {
   local who
   bad "GitHub geeft dit account geen toegang tot Studio MVP ($REPO)."
   who="$(gh_login_name)"
-  if [ -n "$who" ]; then say "Je bent bij GitHub ingelogd als $who; Studio MVP staat onder $GH_ACCOUNT."; fi
-  say "Meestal komt dat doordat je browser nog bij GitHub ingelogd was met je eigen account. Doe dit eerst:"
-  say "  ga in je browser naar github.com, klik rechtsboven op je profielfoto → Sign out."
-  say "Daarna log je hieronder opnieuw in, nu als $GH_ACCOUNT."
-  if yes_no "Opnieuw inloggen bij GitHub, nu als $GH_ACCOUNT?"; then
+  if [ -n "$who" ]; then say "Je bent bij GitHub ingelogd als $who; Studio MVP staat in de GitHub-organisatie $ORG."; fi
+  say "Meestal is de inlog verlopen, of was je browser bij GitHub ingelogd met een ander account dan het jouwe. Doe dan eerst dit:"
+  say "  ga in je browser naar github.com, klik rechtsboven op de profielfoto → Sign out, en log in met je eigen account."
+  if yes_no "Opnieuw inloggen bij GitHub, met je eigen account?"; then
     if gh_login; then
       gh auth setup-git --hostname github.com >/dev/null 2>&1 </dev/null || true
+      GH_WHO="$(gh_login_name)"
       return 0
     fi
   fi
@@ -558,12 +617,37 @@ clone_starter() {
       die "GitHub is niet bereikbaar (geen internet?)." "Controleer de internetverbinding en plak de installatieregel nog eens."
     elif is_refused "$out"; then
       if [ "$attempt" = 1 ] && refused_again; then continue; fi
-      die "Studio MVP is niet opgehaald: GitHub gaf dit account geen toegang." \
-        "Log in als $GH_ACCOUNT (of vraag Karim of Menno om toegang voor je eigen account) en plak de installatieregel nog eens."
+      die "Studio MVP is niet opgehaald: GitHub gaf dit account (${GH_WHO:-?}) geen toegang." \
+        "Vraag een beheerder of je GitHub-account lid is van de GitHub-organisatie $ORG (Instellingen › Nieuwe collega toevoegen, met jouw GitHub-naam)." \
+        "Plak daarna deze regel opnieuw."
     else
       die "Studio MVP ophalen lukte niet ($(last_line "$out"))." "Plak de installatieregel nog eens; blijft het misgaan, stuur dan het logbestand."
     fi
   done
+}
+
+# A copy made before Studio MVP moved to the organisation still points at the old address (GitHub redirects it):
+# from now on the organisation. Only a GitHub address of studiomvp-starter under another owner (as configured, https or
+# ssh); anything else (a fork elsewhere, a local copy) is left alone.
+follow_move() {
+  local url path
+  url="$(git -C "$STARTER" config --get remote.origin.url 2>/dev/null </dev/null || true)"
+  case "$url" in
+    https://github.com/* | git@github.com:*) path="${url#*github.com[:/]}" ;;
+    *) return 0 ;;
+  esac
+  path="${path%/}"
+  path="${path%.git}"
+  if [ "$(lower "$path")" = "$(lower "$REPO")" ]; then return 0; fi
+  case "$path" in */*/*) return 0 ;; */studiomvp-starter) ;; *) return 0 ;; esac
+  if [ "$DRY" = 1 ]; then
+    plan "Studio MVP voortaan ophalen uit de organisatie ($REPO; nu nog van $path, dat doorstuurt)"
+    return 0
+  fi
+  log "remote was: $url"
+  if git -C "$STARTER" remote set-url origin "https://github.com/$REPO.git" </dev/null >/dev/null 2>&1; then
+    ok "Studio MVP komt voortaan uit de organisatie ($REPO; was $path)"
+  fi
 }
 
 update_starter() {
@@ -571,6 +655,7 @@ update_starter() {
   dirty="$(git -C "$STARTER" status --porcelain --untracked-files=no 2>/dev/null </dev/null || true)"
   branch="$(git -C "$STARTER" symbolic-ref --short -q HEAD 2>/dev/null </dev/null || true)"
   ok "Studio MVP staat er al ($STARTER_SHOWN)"
+  follow_move
   if [ -n "$dirty" ]; then
     note "Daarin zijn bestanden veranderd. Die laat ik met rust, dus ik haal nu geen nieuwe versie op."
     tip "Is dat niet de bedoeling? Vraag Karim om te kijken. Ik ga verder met de versie die er staat."
@@ -650,7 +735,7 @@ hand_over() {
 
 usage() {
   printf 'Studio MVP installeren op deze Mac:\n'
-  printf '  curl -fsSL https://raw.githubusercontent.com/mennovanpaassen/studiomvp-installeer/main/installeer.sh | bash\n'
+  printf '  curl -fsSL https://raw.githubusercontent.com/studio-mvp/studiomvp-installeer/main/installeer.sh | bash\n'
   printf 'Proef (verandert niets): … | bash -s -- --proef\n'
 }
 
